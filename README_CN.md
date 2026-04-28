@@ -127,6 +127,39 @@ anthropic_base_url: https://another-endpoint.example.com
 
 <img src="assets/cursor_chat.png" width="480" alt="在 Cursor 中与 DeepSeek 聊天">
 
+## Docker 部署
+
+也可以使用 Docker 运行代理。配置文件与推理缓存通过卷挂载持久化到宿主机的 `~/.deepseek-cursor-proxy`。
+
+### 使用 Docker
+
+```bash
+# 构建镜像
+docker build -t deepseek-cursor-proxy .
+
+# 运行容器
+docker run -d \
+  --name deepseek-cursor-proxy \
+  -p 9000:9000 \
+  -v ~/.deepseek-cursor-proxy:/root/.deepseek-cursor-proxy \
+  deepseek-cursor-proxy
+
+# 添加额外 CLI 参数
+docker run -d \
+  --name deepseek-cursor-proxy \
+  -p 9000:9000 \
+  -v ~/.deepseek-cursor-proxy:/root/.deepseek-cursor-proxy \
+  deepseek-cursor-proxy --ngrok --verbose
+```
+
+### 使用 Docker Compose
+
+```bash
+docker compose up -d
+```
+
+编辑 `docker-compose.yml` 添加额外 CLI 参数或修改端口映射。
+
 ## 工作原理
 
 - **核心修复：** DeepSeek 的[推理模式](https://api-docs.deepseek.com/guides/thinking_mode#tool-calls)要求后续请求必须回传 assistant 工具调用消息中的 `reasoning_content`，但 Cursor 会忽略该字段，导致 400 错误。代理（`Cursor → ngrok → proxy → DeepSeek API`）将每次 DeepSeek 响应中的 `reasoning_content` 存储在本地 SQLite 缓存中，按消息签名、工具调用 ID 和工具调用函数签名建立索引，并在请求到达 DeepSeek 之前补全缺失的 `reasoning_content`。冷缓存时（代理重启、模型切换），会记录并丢弃无法恢复的历史记录，从最新的用户请求继续，并在下一个 Cursor 响应前添加提示。

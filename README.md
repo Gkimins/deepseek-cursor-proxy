@@ -128,6 +128,39 @@ Select `deepseek-v4-pro` in Cursor and use chat or agent mode as usual.
 
 <img src="assets/cursor_chat.png" width="480" alt="Chatting with DeepSeek in Cursor">
 
+## Docker
+
+You can also run the proxy with Docker. The config and reasoning cache are persisted on the host at `~/.deepseek-cursor-proxy`.
+
+### Using Docker
+
+```bash
+# Build
+docker build -t deepseek-cursor-proxy .
+
+# Run
+docker run -d \
+  --name deepseek-cursor-proxy \
+  -p 9000:9000 \
+  -v ~/.deepseek-cursor-proxy:/root/.deepseek-cursor-proxy \
+  deepseek-cursor-proxy
+
+# Pass extra CLI flags
+docker run -d \
+  --name deepseek-cursor-proxy \
+  -p 9000:9000 \
+  -v ~/.deepseek-cursor-proxy:/root/.deepseek-cursor-proxy \
+  deepseek-cursor-proxy --ngrok --verbose
+```
+
+### Using Docker Compose
+
+```bash
+docker compose up -d
+```
+
+Edit `docker-compose.yml` to add extra CLI flags or change port mappings.
+
 ## How It Works
 
 - **Core fix:** DeepSeek's [thinking mode](https://api-docs.deepseek.com/guides/thinking_mode#tool-calls) requires `reasoning_content` from assistant tool-call messages to be passed back in subsequent requests, but Cursor omits this field, causing a 400 error. The proxy (`Cursor → ngrok → proxy → DeepSeek API`) stores `reasoning_content` from every DeepSeek response in a local SQLite cache, keyed by message signature, tool-call ID, and tool-call function signature, and patches outgoing requests with missing `reasoning_content` before they reach DeepSeek. On a cold cache (proxy restart, model switch), it logs and drops unrecoverable history, continues from the latest user request, and prefixes the next Cursor response with a notice.

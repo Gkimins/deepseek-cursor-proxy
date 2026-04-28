@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pixi/
+.pdm-python/
+dist/
+build/
+*.egg-info/
+
+# Dev / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+.cunzhi-memory/
+.fastRequest/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Runtime artifacts
+*.sqlite3
+
+# Docs / temp
+temp-doc/
+assets/
+
+# Config
+.env
+.envrc
+.pre-commit-config.yaml
+
+# Claude
+CLAUDE.md

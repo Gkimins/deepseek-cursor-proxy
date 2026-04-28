@@ -1,0 +1,10 @@
+services:
+  deepseek-cursor-proxy:
+    build: .
+    image: deepseek-cursor-proxy:latest
+    container_name: deepseek-cursor-proxy
+    ports:
+      - "9000:9000"
+    volumes:
+      - ~/.deepseek-cursor-proxy:/root/.deepseek-cursor-proxy
+    restart: unless-stopped
