@@ -9,8 +9,9 @@ This proxy can also help **other applications and coding agents** beyond Cursor 
 
 - ✅ Injects `reasoning_content` into outgoing tool-call requests since Cursor does not include the field, restoring previously cached reasoning from regular and streamed DeepSeek responses. See [DeepSeek docs](https://api-docs.deepseek.com/guides/thinking_mode#tool-calls) for more details.
 - ✅ Displays DeepSeek's thinking tokens in Cursor by forwarding them into Cursor-visible `<think>...</think>` blocks. In BYOK (bring your own key) mode, Cursor renders these thinking blocks as plain text instead of a native collapsible thinking view. You can disable thinking token display with `--no-display-reasoning` or setting `display_reasoning: false` in the config file.
-- ✅ Starts an ngrok tunnel so Cursor can reach the local proxy through a public HTTPS URL.
-- ✅ Provides Anthropic API compatibility (`/v1/messages`) alongside OpenAI format (`/v1/chat/completions`), both forwarding to DeepSeek.
+- ✅ Starts an ngrok tunnel so Cursor can reach the local proxy through a public HTTPS URL (disabled by default; enable with `--ngrok` or `ngrok: true`).
+- ✅ Provides full Anthropic API compatibility (`/v1/messages` with SSE streaming) alongside OpenAI format (`/v1/chat/completions`), both forwarding to DeepSeek.
+- ✅ Retries upstream API requests on transient failures (HTTP 429, 5xx) with exponential backoff (up to 3 retries).
 - ✅ Provides other compatibility fixes to make DeepSeek models run well in Cursor.
 
 ## Why This Exists
@@ -38,7 +39,7 @@ Provider returned error:
 
 Cursor blocks non-public API URLs such as `localhost`, so the proxy needs a public HTTPS URL. [ngrok](https://ngrok.com/) can expose the local proxy to Cursor without opening router ports. Alternatively, you may use [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/setup/). Create an ngrok account and visit [ngrok's dashboard](https://dashboard.ngrok.com). You will find the authtoken and public URL there.
 
-If you're using this proxy with another application that allows localhost API endpoints, you can skip this step entirely by setting `ngrok: false` in `~/.deepseek-cursor-proxy/config.yaml`, or by starting the proxy with `--no-ngrok`.
+If you're using this proxy with another application that allows localhost API endpoints, you can skip this step entirely — ngrok is disabled by default (since v0.2). To enable it, start the proxy with `--ngrok` or set `ngrok: true` in `~/.deepseek-cursor-proxy/config.yaml`.
 
 <img src="assets/ngrok_dashboard.png" width="600" alt="ngrok dashboard">
 
@@ -104,28 +105,14 @@ pip install -e .
 deepseek-cursor-proxy
 ```
 
-When ngrok is enabled, `deepseek-cursor-proxy` will print the ngrok public URL on start. If it differs from the one in Cursor, update it in Cursor's Base URL field.
+If ngrok is enabled, `deepseek-cursor-proxy` will print the ngrok public URL on start. If it differs from the one in Cursor, update it in Cursor's Base URL field.
 
 On the first run, `deepseek-cursor-proxy` will create:
 
 - `~/.deepseek-cursor-proxy/config.yaml`: the configuration file
 - `~/.deepseek-cursor-proxy/reasoning_content.sqlite3`: the reasoning content cache
 
-Persistent settings live in `~/.deepseek-cursor-proxy/config.yaml`. You can also override the config with command-line flags, for example:
-
-```bash
-# Hide thinking tokens displaying in Cursor UI
-deepseek-cursor-proxy --no-display-reasoning
-
-# Show full incoming and outgoing requests
-deepseek-cursor-proxy --verbose
-
-# Run without ngrok (run on localhost directly)
-deepseek-cursor-proxy --no-ngrok
-
-# Use a different local port
-deepseek-cursor-proxy --port 9000
-```
+Persistent settings live in `~/.deepseek-cursor-proxy/config.yaml`. Command-line flags override the config for a single run, for example `--ngrok`, `--port 9000`, or `--verbose`.
 
 The proxy supports forwarding both OpenAI-format (`/v1/chat/completions`) and Anthropic-format (`/v1/messages`) requests to DeepSeek. By default, both use the same `base_url`. To route Anthropic requests to a different endpoint, set `anthropic_base_url` in the config file or pass `--anthropic-base-url` on the command line.
 
@@ -147,6 +134,8 @@ Select `deepseek-v4-pro` in Cursor and use chat or agent mode as usual.
 - **Multi-conversation isolation:** To avoid collisions across concurrent conversations, the proxy scopes cache keys by a SHA-256 hash of the canonical conversation prefix (roles, content, and tool calls, excluding `reasoning_content`) plus the upstream model, configuration, and an API-key hash. Different threads get different scopes, so reused tool-call IDs do not collide. Byte-identical cloned histories produce identical scopes.
 - **Context caching compatibility:** The proxy preserves compatibility by never injecting synthetic thread IDs, timestamps, or cache-control messages. It restores `reasoning_content` as the exact original string, so repeated prefixes remain intact for [DeepSeek context cache](https://api-docs.deepseek.com/guides/kv_cache). Cache hit rates are logged in the terminal output.
 - **Additional compatibility fixes:** Beyond reasoning repair, the proxy converts legacy `functions`/`function_call` fields to `tools`/`tool_choice`, preserves required and named tool-choice semantics, normalizes `reasoning_effort` aliases, strips mirrored `<think>` blocks from assistant content, flattens multi-part content arrays to plain text, and mirrors `reasoning_content` into Cursor-visible `<think>...</think>` blocks.
+- **Anthropic API compatibility:** The proxy accepts Anthropic-format requests at `/v1/messages` and translates them to DeepSeek's native Anthropic-compatible endpoint. It handles Anthropic SSE streaming events (`message_start`, `content_block_start/delta/stop`, `message_delta`, `message_stop`), caches and injects thinking content (equivalent to `reasoning_content` in the OpenAI pathway) using the same SQLite store with Anthropic-specific cache key namespacing, and supports recovery from missing thinking history.
+- **Upstream retry with backoff:** The proxy retries upstream API requests up to 3 times on transient failures — HTTP 429 (rate limit), 5xx server errors, and network errors — with exponential backoff delays (1s, then 2s). Client errors (4xx except 429) fail immediately without retry. Both OpenAI and Anthropic pathways share this retry logic.
 
 ## Development
 
@@ -171,10 +160,10 @@ Run with verbose output:
 deepseek-cursor-proxy --verbose
 ```
 
-Run without ngrok for local curl testing:
+Run without ngrok for local curl testing (ngrok is off by default):
 
 ```bash
-deepseek-cursor-proxy --no-ngrok --port 9000 --verbose
+deepseek-cursor-proxy --port 9000 --verbose
 ```
 
 Use another config file:
@@ -187,4 +176,10 @@ Clear the local reasoning cache:
 
 ```bash
 deepseek-cursor-proxy --clear-reasoning-cache
+```
+
+Route Anthropic requests to a different endpoint:
+
+```bash
+deepseek-cursor-proxy --anthropic-base-url https://custom-api.example.com
 ```

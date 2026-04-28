@@ -8,8 +8,9 @@
 
 - ✅ 在工具调用请求中注入 `reasoning_content`（因为 Cursor 不会包含该字段），从常规和流式 DeepSeek 响应中恢复先前缓存的推理内容。详见 [DeepSeek 文档](https://api-docs.deepseek.com/guides/thinking_mode#tool-calls)。
 - ✅ 将流式 `reasoning_content` 镜像为 Cursor 可见的 `<think>...</think>` 文本块，使推理 token 显示在 Cursor UI 中。对于 BYOK 模式，Cursor 会将其渲染为普通文本。
-- ✅ 启动 ngrok 隧道，使 Cursor 能通过公网 HTTPS URL 访问本地代理。
-- ✅ 同时提供 Anthropic API 兼容（`/v1/messages`）和 OpenAI 格式（`/v1/chat/completions`），两者均转发到 DeepSeek。
+- ✅ 启动 ngrok 隧道，使 Cursor 能通过公网 HTTPS URL 访问本地代理（默认关闭；使用 `--ngrok` 或 `ngrok: true` 启用）。
+- ✅ 完整支持 Anthropic API 兼容（`/v1/messages` + SSE 流式传输）和 OpenAI 格式（`/v1/chat/completions`），两者均转发到 DeepSeek。
+- ✅ 瞬时故障（HTTP 429、5xx）自动重试，指数退避（最多重试 3 次）。
 - ✅ 提供其他兼容性修复，使 DeepSeek 模型在 Cursor 中良好运行。
 
 ## 为什么需要这个
@@ -37,7 +38,7 @@ Provider returned error:
 
 Cursor 会阻止 `localhost` 等非公网 API URL，因此代理需要一个公网 HTTPS URL。[ngrok](https://ngrok.com/) 可以将本地代理暴露给 Cursor，无需开放路由器端口。你也可以使用 [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/setup/)。创建一个 ngrok 账户并访问 [ngrok 控制台](https://dashboard.ngrok.com)，即可找到 authtoken 和公网 URL。
 
-如果将此代理用于允许 localhost API 端点的其他应用，可以跳过此步骤：在 `~/.deepseek-cursor-proxy/config.yaml` 中设置 `ngrok: false`，或启动代理时加上 `--no-ngrok`。
+如果将此代理用于允许 localhost API 端点的其他应用，可以跳过此步骤——ngrok 默认关闭（自 v0.2 起）。如需启用，启动代理时加上 `--ngrok`，或在 `~/.deepseek-cursor-proxy/config.yaml` 中设置 `ngrok: true`。
 
 <img src="assets/ngrok_dashboard.png" width="600" alt="ngrok 控制台">
 
@@ -103,14 +104,14 @@ pip install -e .
 deepseek-cursor-proxy
 ```
 
-启用 ngrok 后，`deepseek-cursor-proxy` 启动时会打印 ngrok 公网 URL。如果与 Cursor 中设置的不同，请在 Cursor 的 Base URL 字段中更新。
+如果启用了 ngrok，`deepseek-cursor-proxy` 启动时会打印 ngrok 公网 URL。如果与 Cursor 中设置的不同，请在 Cursor 的 Base URL 字段中更新。
 
 首次运行时，`deepseek-cursor-proxy` 会创建：
 
 - `~/.deepseek-cursor-proxy/config.yaml`：配置文件
 - `~/.deepseek-cursor-proxy/reasoning_content.sqlite3`：推理内容缓存
 
-持久化设置保存在 `~/.deepseek-cursor-proxy/config.yaml` 中。命令行参数会覆盖单次运行的配置，例如 `--no-ngrok`、`--port 9000` 或 `--verbose`。
+持久化设置保存在 `~/.deepseek-cursor-proxy/config.yaml` 中。命令行参数会覆盖单次运行的配置，例如 `--ngrok`、`--port 9000` 或 `--verbose`。
 
 代理支持将 OpenAI 格式（`/v1/chat/completions`）和 Anthropic 格式（`/v1/messages`）的请求转发到 DeepSeek。默认情况下，两者使用相同的 `base_url`。如需将 Anthropic 请求路由到不同的端点，可在配置文件中设置 `anthropic_base_url`，或通过命令行传递 `--anthropic-base-url`。
 
@@ -132,6 +133,8 @@ anthropic_base_url: https://another-endpoint.example.com
 - **多对话隔离：** 为避免并发对话间的冲突，代理通过对规范化对话前缀（角色、内容和工具调用，不含 `reasoning_content`）的 SHA-256 哈希以及上游模型、配置和 API key 哈希来限定缓存键范围。不同线程获得不同的作用域，因此重复使用的工具调用 ID 不会冲突。字节级相同的克隆历史会产生相同的作用域。
 - **上下文缓存兼容性：** 代理通过不注入合成线程 ID、时间戳或缓存控制消息来保持兼容性。它将 `reasoning_content` 恢复为完全相同的原始字符串，使得重复前缀保持完整，兼容 [DeepSeek 上下文缓存](https://api-docs.deepseek.com/guides/kv_cache)。缓存命中率在终端输出中记录。
 - **额外兼容性修复：** 除推理修复外，代理还会将旧版 `functions`/`function_call` 字段转换为 `tools`/`tool_choice`，保留 required 和命名 tool-choice 语义，规范化 `reasoning_effort` 别名，从 assistant 内容中剥离镜像的 `<think>` 块，将多部分内容数组展平为纯文本，并将 `reasoning_content` 镜像为 Cursor 可见的 `<think>...</think>` 块。
+- **Anthropic API 兼容：** 代理在 `/v1/messages` 接受 Anthropic 格式的请求，并将其转换到 DeepSeek 的原生 Anthropic 兼容端点。它处理 Anthropic SSE 流事件（`message_start`、`content_block_start/delta/stop`、`message_delta`、`message_stop`），使用相同的 SQLite 存储缓存和注入 thinking 内容（等效于 OpenAI 路径中的 `reasoning_content`），并使用 Anthropic 特定的缓存键命名空间，同时支持从缺失 thinking 的历史中恢复。
+- **上游重试与退避：** 代理在瞬时故障时最多重试上游 API 请求 3 次——包括 HTTP 429（速率限制）、5xx 服务端错误和网络错误——采用指数退避延迟（1 秒、2 秒）。客户端错误（4xx，429 除外）立即失败不重试。OpenAI 和 Anthropic 路径共享此重试逻辑。
 
 ## 开发
 
@@ -156,10 +159,10 @@ uv run pre-commit run --all-files
 deepseek-cursor-proxy --verbose
 ```
 
-不使用 ngrok 运行，方便本地 curl 测试：
+不使用 ngrok 运行（ngrok 默认关闭），方便本地 curl 测试：
 
 ```bash
-deepseek-cursor-proxy --no-ngrok --port 9000 --verbose
+deepseek-cursor-proxy --port 9000 --verbose
 ```
 
 使用其他配置文件：
@@ -172,4 +175,10 @@ deepseek-cursor-proxy --config ./dev.config.yaml
 
 ```bash
 deepseek-cursor-proxy --clear-reasoning-cache
+```
+
+将 Anthropic 请求路由到不同端点：
+
+```bash
+deepseek-cursor-proxy --anthropic-base-url https://custom-api.example.com
 ```
