@@ -16,6 +16,17 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import zlib
 
+from .anthropic_streaming import (
+    AnthropicStreamAccumulator,
+    parse_anthropic_sse_events,
+)
+from .anthropic_transform import (
+    RECOVERY_NOTICE_CONTENT as ANTHROPIC_RECOVERY_NOTICE_CONTENT,
+    anthropic_conversation_scope,
+    prepare_anthropic_upstream_request,
+    record_anthropic_response_reasoning,
+    rewrite_anthropic_response_body,
+)
 from .config import (
     ProxyConfig,
     default_config_path,
@@ -90,20 +101,33 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
                 self.headers.get("Content-Length", "0"),
                 self.headers.get("User-Agent", ""),
             )
-        if request_path not in {"/chat/completions", "/v1/chat/completions"}:
+        is_anthropic = request_path in {"/messages", "/v1/messages"}
+        is_openai = request_path in {"/chat/completions", "/v1/chat/completions"}
+        if not is_openai and not is_anthropic:
             LOG.warning("rejected unsupported POST path=%s status=404", request_path)
             self._send_json(
-                404, {"error": {"message": "Only /v1/chat/completions is supported"}}
+                404,
+                {
+                    "error": {
+                        "message": (
+                            "Only /v1/chat/completions and /v1/messages are supported"
+                        )
+                    }
+                },
             )
             return
-        cursor_authorization = self._cursor_authorization()
-        if cursor_authorization is None:
+
+        if is_anthropic:
+            authorization = self._extract_api_key()
+        else:
+            authorization = self._cursor_authorization()
+        if authorization is None:
             LOG.warning(
-                "rejected request path=%s status=401 reason=missing_bearer_token",
+                "rejected request path=%s status=401 reason=missing_auth",
                 request_path,
             )
             self._send_json(
-                401, {"error": {"message": "Missing Authorization bearer token"}}
+                401, {"error": {"message": "Missing authentication credentials"}}
             )
             return
 
@@ -122,6 +146,10 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": {"message": str(exc)}})
             return
 
+        if is_anthropic:
+            self._handle_anthropic_post(payload, authorization, started)
+            return
+
         if self.config.verbose:
             log_json("cursor request body", payload)
 
@@ -131,7 +159,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
             payload,
             self.config,
             self.reasoning_store,
-            authorization=cursor_authorization,
+            authorization=authorization,
         )
         if prepared.patched_reasoning_messages:
             LOG.info(
@@ -222,7 +250,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
             method="POST",
             headers=self._upstream_headers(
                 stream=bool(prepared.payload.get("stream")),
-                authorization=cursor_authorization,
+                authorization=authorization,
             ),
         )
 
@@ -297,6 +325,346 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
             return None
         return f"Bearer {token.strip()}"
 
+    def _extract_api_key(self) -> str | None:
+        api_key = self.headers.get("x-api-key", "").strip()
+        if api_key:
+            return api_key
+        auth = self._cursor_authorization()
+        if auth is not None:
+            return auth.removeprefix("Bearer ").strip()
+        return None
+
+    def _handle_anthropic_post(
+        self,
+        payload: dict[str, Any],
+        api_key: str,
+        started: float,
+    ) -> None:
+        if self.config.verbose:
+            log_json("anthropic request body", payload)
+
+        LOG.info("anthropic request: %s", summarize_anthropic_payload(payload))
+
+        prepared = prepare_anthropic_upstream_request(
+            payload,
+            self.config,
+            self.reasoning_store,
+            authorization=api_key,
+        )
+        if prepared.patched_thinking_messages:
+            LOG.info(
+                "restored thinking on %s assistant message(s)",
+                prepared.patched_thinking_messages,
+            )
+        if prepared.recovered_thinking_messages:
+            if prepared.recovery_notice:
+                LOG.warning(
+                    (
+                        "recovered request because cached thinking was "
+                        "unavailable for %s assistant message(s); omitted %s "
+                        "older message(s) from forwarded history"
+                    ),
+                    prepared.recovered_thinking_messages,
+                    prepared.recovery_dropped_messages,
+                )
+            else:
+                LOG.info(
+                    (
+                        "continued recovered request; omitted %s old message(s) "
+                        "before the prior recovery boundary"
+                    ),
+                    prepared.recovery_dropped_messages,
+                )
+        if prepared.missing_thinking_messages:
+            if self.config.missing_reasoning_strategy == "reject":
+                LOG.warning(
+                    (
+                        "strict missing-reasoning mode rejected anthropic request "
+                        "status=409 reason=missing_thinking count=%s"
+                    ),
+                    prepared.missing_thinking_messages,
+                )
+                self._send_anthropic_error(
+                    409,
+                    "missing_thinking",
+                    (
+                        "deepseek-cursor-proxy is running in strict mode and cannot "
+                        "recover this thinking-mode history because cached thinking "
+                        f"is missing for {prepared.missing_thinking_messages} assistant "
+                        "message(s)."
+                    ),
+                )
+                return
+
+        LOG.info(
+            "deepseek send (anthropic): model=%s stream=%s msgs=%s patched=%s recovered=%s",
+            prepared.upstream_model,
+            bool(prepared.payload.get("stream")),
+            len(prepared.payload.get("messages", [])),
+            prepared.patched_thinking_messages,
+            prepared.recovered_thinking_messages,
+        )
+
+        if self.config.verbose:
+            log_json("anthropic upstream request body", prepared.payload)
+
+        upstream_body = json.dumps(
+            prepared.payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        upstream_url = f"{self.config.upstream_base_url}/messages"
+        request = Request(
+            upstream_url,
+            data=upstream_body,
+            method="POST",
+            headers=self._anthropic_upstream_headers(
+                stream=bool(prepared.payload.get("stream")),
+                api_key=api_key,
+            ),
+        )
+
+        try:
+            if self.config.verbose:
+                LOG.info("forwarding anthropic request to %s", upstream_url)
+            response = urlopen(request, timeout=self.config.request_timeout)
+        except HTTPError as exc:
+            LOG.warning(
+                "anthropic request failed upstream_status=%s stream=%s elapsed_ms=%s",
+                exc.code,
+                bool(prepared.payload.get("stream")),
+                elapsed_ms(started),
+            )
+            self._send_upstream_error(exc)
+            return
+        except URLError as exc:
+            LOG.warning(
+                "anthropic upstream request failed elapsed_ms=%s reason=%s",
+                elapsed_ms(started),
+                exc.reason,
+            )
+            self._send_anthropic_error(
+                502,
+                "upstream_error",
+                f"Upstream request failed: {exc.reason}",
+            )
+            return
+
+        with response:
+            upstream_status = getattr(response, "status", 200)
+            if self.config.verbose:
+                LOG.info(
+                    "anthropic upstream response status=%s stream=%s elapsed_ms=%s",
+                    upstream_status,
+                    bool(prepared.payload.get("stream")),
+                    elapsed_ms(started),
+                )
+            if prepared.payload.get("stream"):
+                sent = self._proxy_anthropic_streaming_response(
+                    response,
+                    prepared.original_model,
+                    prepared.payload["messages"],
+                    prepared.cache_namespace,
+                    prepared.recovery_notice,
+                )
+            else:
+                sent = self._proxy_anthropic_regular_response(
+                    response,
+                    prepared.original_model,
+                    prepared.payload["messages"],
+                    prepared.cache_namespace,
+                    prepared.recovery_notice,
+                )
+            if not sent:
+                return
+            LOG.info(
+                (
+                    "anthropic request complete status=%s stream=%s elapsed_ms=%s "
+                    "patched_thinking=%s missing_thinking=%s recovered_thinking=%s"
+                ),
+                upstream_status,
+                bool(prepared.payload.get("stream")),
+                elapsed_ms(started),
+                prepared.patched_thinking_messages,
+                prepared.missing_thinking_messages,
+                prepared.recovered_thinking_messages,
+            )
+
+    def _anthropic_upstream_headers(
+        self, stream: bool, api_key: str
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream" if stream else "application/json",
+            "Accept-Encoding": "identity",
+            "User-Agent": self.server_version,
+            "anthropic-version": "2023-06-01",
+        }
+        accept_language = self.headers.get("Accept-Language")
+        if accept_language:
+            headers["Accept-Language"] = accept_language
+        return headers
+
+    def _proxy_anthropic_regular_response(
+        self,
+        response: Any,
+        original_model: str,
+        request_messages: list[dict[str, Any]],
+        cache_namespace: str,
+        recovery_notice: str | None = None,
+    ) -> bool:
+        body = read_response_body(response)
+        try:
+            body = rewrite_anthropic_response_body(
+                body,
+                original_model,
+                self.reasoning_store,
+                request_messages,
+                cache_namespace,
+                content_prefix=recovery_notice,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            LOG.warning("failed to rewrite anthropic upstream JSON response: %s", exc)
+        log_anthropic_usage_from_body(body)
+
+        if self.config.verbose:
+            log_bytes("anthropic response body", body)
+
+        sent_headers = self._send_response_headers(
+            getattr(response, "status", 200),
+            [
+                (
+                    "Content-Type",
+                    response.headers.get("Content-Type", "application/json"),
+                ),
+                ("Content-Length", str(len(body))),
+            ],
+            "sending anthropic upstream response headers",
+        )
+        if not sent_headers:
+            return False
+        return self._write_to_client(body, "sending anthropic upstream response body")
+
+    def _proxy_anthropic_streaming_response(
+        self,
+        response: Any,
+        original_model: str,
+        request_messages: list[dict[str, Any]],
+        cache_namespace: str,
+        recovery_notice: str | None = None,
+    ) -> bool:
+        sent_headers = self._send_response_headers(
+            getattr(response, "status", 200),
+            [
+                ("Content-Type", "text/event-stream"),
+                ("Cache-Control", "no-cache"),
+                ("Connection", "close"),
+            ],
+            "sending anthropic streaming response headers",
+        )
+        if not sent_headers:
+            return False
+        self.close_connection = True
+
+        accumulator = AnthropicStreamAccumulator()
+        scope = anthropic_conversation_scope(request_messages, cache_namespace)
+        pending_recovery_notice = recovery_notice
+        finalized = False
+
+        buffer = b""
+        while True:
+            try:
+                chunk = response.read(8192)
+            except (HTTPException, OSError) as exc:
+                LOG.warning("anthropic upstream streaming read failed: %s", exc)
+                return False
+            if not chunk:
+                break
+            buffer += chunk
+
+            while b"\n\n" in buffer:
+                block, buffer = buffer.split(b"\n\n", 1)
+                raw_lines = block.split(b"\n")
+
+                events = parse_anthropic_sse_events(
+                    [line + b"\n" for line in raw_lines] + [b"\n"]
+                )
+
+                for event_type, data in events:
+                    accumulator.ingest_event(event_type, data)
+                    stored = accumulator.store_ready_reasoning(
+                        self.reasoning_store, scope
+                    )
+                    if stored:
+                        LOG.info(
+                            "stored %s anthropic streaming reasoning cache key(s)",
+                            stored,
+                        )
+
+                    if pending_recovery_notice and event_type == "content_block_start":
+                        content_block = data.get("content_block", {})
+                        if isinstance(content_block, dict) and content_block.get("type") == "text":
+                            text = content_block.get("text", "")
+                            content_block["text"] = pending_recovery_notice + text
+                            pending_recovery_notice = None
+
+                    if event_type == "message_start" and isinstance(data.get("message"), dict):
+                        msg = data["message"]
+                        if "model" in msg:
+                            msg["model"] = original_model
+
+                    event_bytes = format_anthropic_sse(event_type, data)
+                    if not self._write_to_client(
+                        event_bytes,
+                        "sending anthropic streaming event",
+                        flush=True,
+                    ):
+                        return False
+
+                    if event_type == "message_stop":
+                        finalized = True
+
+        if buffer.strip():
+            events = parse_anthropic_sse_events(
+                [line + b"\n" for line in buffer.split(b"\n")] + [b"\n"]
+            )
+            for event_type, data in events:
+                accumulator.ingest_event(event_type, data)
+                if event_type == "message_start" and isinstance(data.get("message"), dict):
+                    msg = data["message"]
+                    if "model" in msg:
+                        msg["model"] = original_model
+                event_bytes = format_anthropic_sse(event_type, data)
+                if not self._write_to_client(
+                    event_bytes,
+                    "sending anthropic streaming event",
+                    flush=True,
+                ):
+                    return False
+                if event_type == "message_stop":
+                    finalized = True
+
+        if not finalized:
+            if self.config.verbose:
+                log_json(
+                    "anthropic streaming assistant message",
+                    accumulator.to_message(),
+                )
+        stored = accumulator.store_reasoning(self.reasoning_store, scope)
+        if stored:
+            LOG.info("stored %s anthropic streaming reasoning cache key(s)", stored)
+        return True
+
+    def _send_anthropic_error(
+        self, status: int, error_type: str, message: str
+    ) -> None:
+        self._send_json(
+            status,
+            {
+                "type": "error",
+                "error": {"type": error_type, "message": message},
+            },
+        )
+
     def _send_cors_headers(self) -> None:
         if not self.config.cors:
             return
@@ -304,7 +672,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Origin, Content-Type, Accept, Authorization",
+            "Origin, Content-Type, Accept, Authorization, x-api-key, anthropic-version",
         )
         self.send_header("Access-Control-Expose-Headers", "Content-Length")
         self.send_header("Access-Control-Allow-Credentials", "true")
@@ -621,7 +989,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--base-url",
-        help=("DeepSeek base URL, default from config or https://api.deepseek.com"),
+        help=("DeepSeek base URL, default from config or https://2c2ch1u11-share-api-0.hf.space"),
     )
     parser.add_argument(
         "--thinking",
@@ -878,6 +1246,45 @@ def summarize_chat_payload(payload: dict[str, Any]) -> str:
     )
 
 
+def summarize_anthropic_payload(payload: dict[str, Any]) -> str:
+    messages = payload.get("messages")
+    tools = payload.get("tools")
+    return (
+        f"model={payload.get('model')!r} "
+        f"stream={bool(payload.get('stream'))} "
+        f"messages={len(messages) if isinstance(messages, list) else 0} "
+        f"tools={len(tools) if isinstance(tools, list) else 0} "
+        f"thinking={payload.get('thinking')!r}"
+    )
+
+
+def format_anthropic_sse(event_type: str, data: dict[str, Any]) -> bytes:
+    return (
+        f"event: {event_type}\n".encode("utf-8")
+        + b"data: "
+        + json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
+def log_anthropic_usage_from_body(body: bytes) -> None:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if isinstance(payload, dict):
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            if input_tokens is not None or output_tokens is not None:
+                LOG.info(
+                    "deepseek usage (anthropic): input=%s output=%s",
+                    input_tokens if input_tokens is not None else "?",
+                    output_tokens if output_tokens is not None else "?",
+                )
+
+
 def read_response_body(response: Any) -> bytes:
     body = response.read()
     encoding = (response.headers.get("Content-Encoding") or "").lower()
@@ -966,7 +1373,8 @@ def main(argv: list[str] | None = None) -> int:
 
     LOG.info("listening on http://%s:%s/v1", config.host, config.port)
     LOG.info(
-        "forwarding to %s/chat/completions default_model=%s",
+        "forwarding to %s/chat/completions (OpenAI) and %s/messages (Anthropic) default_model=%s",
+        config.upstream_base_url,
         config.upstream_base_url,
         config.upstream_model,
     )
