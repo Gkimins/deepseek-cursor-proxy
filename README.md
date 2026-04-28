@@ -10,6 +10,7 @@ This proxy can also help **other applications and coding agents** beyond Cursor 
 - ✅ Injects `reasoning_content` into outgoing tool-call requests since Cursor does not include the field, restoring previously cached reasoning from regular and streamed DeepSeek responses. See [DeepSeek docs](https://api-docs.deepseek.com/guides/thinking_mode#tool-calls) for more details.
 - ✅ Displays DeepSeek's thinking tokens in Cursor by forwarding them into Cursor-visible `<think>...</think>` blocks. In BYOK (bring your own key) mode, Cursor renders these thinking blocks as plain text instead of a native collapsible thinking view. You can disable thinking token display with `--no-display-reasoning` or setting `display_reasoning: false` in the config file.
 - ✅ Starts an ngrok tunnel so Cursor can reach the local proxy through a public HTTPS URL.
+- ✅ Provides Anthropic API compatibility (`/v1/messages`) alongside OpenAI format (`/v1/chat/completions`), both forwarding to DeepSeek.
 - ✅ Provides other compatibility fixes to make DeepSeek models run well in Cursor.
 
 ## Why This Exists
@@ -124,6 +125,14 @@ deepseek-cursor-proxy --no-ngrok
 
 # Use a different local port
 deepseek-cursor-proxy --port 9000
+```
+
+The proxy supports forwarding both OpenAI-format (`/v1/chat/completions`) and Anthropic-format (`/v1/messages`) requests to DeepSeek. By default, both use the same `base_url`. To route Anthropic requests to a different endpoint, set `anthropic_base_url` in the config file or pass `--anthropic-base-url` on the command line.
+
+```yaml
+# Example: route Anthropic requests to a different endpoint
+base_url: https://api.deepseek.com
+anthropic_base_url: https://another-endpoint.example.com
 ```
 
 ### Step 4: Chat with DeepSeek in Cursor
