@@ -412,6 +412,25 @@ def has_anthropic_recovery_notice(message: dict[str, Any]) -> bool:
     return False
 
 
+def _preceding_assistant_for_tool_result(
+    messages: list[dict[str, Any]],
+    user_index: int,
+) -> dict[str, Any] | None:
+    """Return the assistant message immediately before *user_index* if the
+    user message contains ``tool_result`` blocks that reference ``tool_use``
+    blocks in that assistant message.  Keeping the pair together avoids
+    Anthropic API 400 errors about orphaned ``tool_use_id`` references."""
+    if user_index <= 0:
+        return None
+    user_msg = messages[user_index]
+    if not has_tool_result_blocks(user_msg.get("content")):
+        return None
+    prev = messages[user_index - 1]
+    if prev.get("role") == "assistant" and has_tool_use_blocks(prev.get("content")):
+        return prev
+    return None
+
+
 def recover_anthropic_messages(
     messages: list[dict[str, Any]],
     missing_indexes: list[int],
@@ -436,9 +455,14 @@ def recover_anthropic_messages(
         )
         recovered_tail = []
         if context_user != -1:
+            prev_assistant = _preceding_assistant_for_tool_result(
+                messages, context_user
+            )
+            if prev_assistant is not None:
+                recovered_tail.append(prev_assistant)
             recovered_tail.append(messages[context_user])
         recovered_tail.extend(messages[recovery_boundary:])
-        omitted = recovery_boundary - (1 if context_user != -1 else 0)
+        omitted = len(messages) - len(recovered_tail)
         return recovered_tail, omitted, None
 
     last_user = next(
@@ -452,8 +476,12 @@ def recover_anthropic_messages(
     if last_user == -1:
         return messages, 0, None
 
-    recovered = [messages[last_user]]
-    omitted = len(messages) - 1
+    recovered: list[dict[str, Any]] = []
+    prev_assistant = _preceding_assistant_for_tool_result(messages, last_user)
+    if prev_assistant is not None:
+        recovered.append(prev_assistant)
+    recovered.append(messages[last_user])
+    omitted = len(messages) - len(recovered)
     return recovered, omitted, RECOVERY_NOTICE_CONTENT
 
 
