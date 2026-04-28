@@ -17,7 +17,8 @@ MISSING = object()
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 9000
-DEFAULT_UPSTREAM_BASE_URL = "https://2c2ch1u11-share-api-0.hf.space/v1"
+DEFAULT_UPSTREAM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_UPSTREAM_ANTHROPIC_BASE_URL = ""
 DEFAULT_UPSTREAM_MODEL = "deepseek-v4-pro"
 DEFAULT_THINKING = "enabled"
 DEFAULT_REASONING_EFFORT = "high"
@@ -40,6 +41,7 @@ DEFAULT_CONFIG_TEXT = f"""{DEFAULT_CONFIG_HEADER}
 # `model` is the fallback when a request has no model; Cursor's requested
 # DeepSeek model name is otherwise respected.
 base_url: {DEFAULT_UPSTREAM_BASE_URL}
+anthropic_base_url: {DEFAULT_UPSTREAM_ANTHROPIC_BASE_URL or ""}
 model: {DEFAULT_UPSTREAM_MODEL}
 thinking: {DEFAULT_THINKING}
 reasoning_effort: {DEFAULT_REASONING_EFFORT}
@@ -181,6 +183,7 @@ class ProxyConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     upstream_base_url: str = DEFAULT_UPSTREAM_BASE_URL
+    upstream_anthropic_base_url: str = DEFAULT_UPSTREAM_ANTHROPIC_BASE_URL
     upstream_model: str = DEFAULT_UPSTREAM_MODEL
     thinking: str = DEFAULT_THINKING
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
@@ -195,6 +198,10 @@ class ProxyConfig:
     cors: bool = DEFAULT_CORS
     verbose: bool = DEFAULT_VERBOSE
     ngrok: bool = DEFAULT_NGROK
+
+    @property
+    def effective_anthropic_base_url(self) -> str:
+        return self.upstream_anthropic_base_url or self.upstream_base_url
 
     @classmethod
     def from_file(
@@ -216,6 +223,10 @@ class ProxyConfig:
             upstream_base_url=as_str(
                 setting_value(settings, "base_url"),
                 DEFAULT_UPSTREAM_BASE_URL,
+            ).rstrip("/"),
+            upstream_anthropic_base_url=as_str(
+                setting_value(settings, "anthropic_base_url"),
+                DEFAULT_UPSTREAM_ANTHROPIC_BASE_URL,
             ).rstrip("/"),
             upstream_model=as_str(
                 setting_value(settings, "model"),

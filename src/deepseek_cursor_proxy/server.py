@@ -411,7 +411,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         upstream_body = json.dumps(
             prepared.payload, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
-        upstream_url = f"{self.config.upstream_base_url}/messages"
+        upstream_url = f"{self.config.effective_anthropic_base_url}/messages"
         request = Request(
             upstream_url,
             data=upstream_body,
@@ -1033,6 +1033,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=("DeepSeek base URL, default from config or https://2c2ch1u11-share-api-0.hf.space"),
     )
     parser.add_argument(
+        "--anthropic-base-url",
+        help=(
+            "DeepSeek base URL for Anthropic-format requests (e.g. /v1/messages). "
+            "When empty or omitted, defaults to the same value as --base-url."
+        ),
+    )
+    parser.add_argument(
         "--thinking",
         choices=["enabled", "disabled", "pass-through"],
         help="DeepSeek thinking mode, default from config or enabled",
@@ -1377,6 +1384,8 @@ def main(argv: list[str] | None = None) -> int:
         updates["upstream_model"] = args.model
     if args.base_url is not None:
         updates["upstream_base_url"] = args.base_url.rstrip("/")
+    if args.anthropic_base_url is not None:
+        updates["upstream_anthropic_base_url"] = args.anthropic_base_url.rstrip("/")
     if args.thinking is not None:
         updates["thinking"] = args.thinking
     if args.reasoning_effort is not None:
@@ -1425,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
     LOG.info(
         "forwarding to %s/chat/completions (OpenAI) and %s/messages (Anthropic) default_model=%s",
         config.upstream_base_url,
-        config.upstream_base_url,
+        config.effective_anthropic_base_url,
         config.upstream_model,
     )
     LOG.info(
