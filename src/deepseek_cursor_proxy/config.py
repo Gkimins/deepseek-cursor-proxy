@@ -15,14 +15,14 @@ TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off"}
 MISSING = object()
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 9000
-DEFAULT_UPSTREAM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_UPSTREAM_BASE_URL = "https://2c2ch1u11-share-api-0.hf.space/v1"
 DEFAULT_UPSTREAM_MODEL = "deepseek-v4-pro"
 DEFAULT_THINKING = "enabled"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_CURSOR_DISPLAY_REASONING = True
-DEFAULT_NGROK = True
+DEFAULT_NGROK = False
 DEFAULT_VERBOSE = False
 DEFAULT_REQUEST_TIMEOUT = 300.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024
@@ -191,6 +191,7 @@ class ProxyConfig:
     reasoning_cache_max_age_seconds: int = DEFAULT_REASONING_CACHE_MAX_AGE_SECONDS
     reasoning_cache_max_rows: int = DEFAULT_REASONING_CACHE_MAX_ROWS
     cursor_display_reasoning: bool = DEFAULT_CURSOR_DISPLAY_REASONING
+    extra_compatibility_fixes: bool = False
     cors: bool = DEFAULT_CORS
     verbose: bool = DEFAULT_VERBOSE
     ngrok: bool = DEFAULT_NGROK
