@@ -1,5 +1,7 @@
 <h1 align="center"><img src="assets/logo.png" width="150" alt="deepseek-cursor-proxy logo"><br>DeepSeek Cursor Proxy</h1>
 
+<p align="center"><strong><a href="README.md">English</a> | <a href="README_CN.md">中文</a></strong></p>
+
 一个兼容代理，通过正确处理 DeepSeek 工具调用推理 API 请求中的 `reasoning_content` 字段，将 Cursor 连接到 DeepSeek 推理模型（`deepseek-v4-pro` 和 `deepseek-v4-flash`）。
 
 此代理同样适用于**遇到相同 `reasoning_content` 缺失问题的其他应用和编码代理**。只需将它们的 API base URL 指向该代理即可。
