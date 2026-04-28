@@ -257,7 +257,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         try:
             if self.config.verbose:
                 LOG.info("forwarding to %s", upstream_url)
-            response = urlopen(request, timeout=self.config.request_timeout)
+            response = self._request_with_retry(request, label="openai")
         except HTTPError as exc:
             LOG.warning(
                 "request failed upstream_status=%s stream=%s elapsed_ms=%s",
@@ -425,7 +425,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         try:
             if self.config.verbose:
                 LOG.info("forwarding anthropic request to %s", upstream_url)
-            response = urlopen(request, timeout=self.config.request_timeout)
+            response = self._request_with_retry(request, label="anthropic")
         except HTTPError as exc:
             LOG.warning(
                 "anthropic request failed upstream_status=%s stream=%s elapsed_ms=%s",
@@ -781,6 +781,47 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         if accept_language:
             headers["Accept-Language"] = accept_language
         return headers
+
+    def _request_with_retry(self, request: Request, label: str = "") -> Any:
+        max_attempts = 3
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return urlopen(request, timeout=self.config.request_timeout)
+            except HTTPError as exc:
+                if exc.code == 429 or exc.code >= 500:
+                    last_exc = exc
+                    if attempt < max_attempts:
+                        delay = attempt
+                        LOG.warning(
+                            "%s upstream HTTP %s on attempt %s/%s, retrying in %ss",
+                            label,
+                            exc.code,
+                            attempt,
+                            max_attempts,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        request = _clone_request(request)
+                        continue
+                raise
+            except URLError as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    delay = attempt
+                    LOG.warning(
+                        "%s upstream connection error on attempt %s/%s, retrying in %ss: %s",
+                        label,
+                        attempt,
+                        max_attempts,
+                        delay,
+                        exc.reason,
+                    )
+                    time.sleep(delay)
+                    request = _clone_request(request)
+                    continue
+                raise
+        raise last_exc  # type: ignore[misc]
 
     def _send_upstream_error(self, exc: HTTPError) -> None:
         body = read_response_body(exc)
@@ -1283,6 +1324,15 @@ def log_anthropic_usage_from_body(body: bytes) -> None:
                     input_tokens if input_tokens is not None else "?",
                     output_tokens if output_tokens is not None else "?",
                 )
+
+
+def _clone_request(original: Request) -> Request:
+    return Request(
+        original.full_url,
+        data=original.data,
+        headers=dict(original.headers),
+        method=original.get_method(),
+    )
 
 
 def read_response_body(response: Any) -> bytes:
